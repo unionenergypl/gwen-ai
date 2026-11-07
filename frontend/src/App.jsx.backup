@@ -1,0 +1,516 @@
+
+import { useEffect, useRef, useState } from "react";
+import "./App.css";
+
+const API = "http://localhost:3000";
+
+const languageInstructions = {
+  Auto: "Automatically detect the user's language. Prioritize natural Singapore English and Mandarin Chinese. Follow the language the user speaks, including switching between them mid-conversation. Understand Singaporean expressions and code-switching. Support Cantonese and Hokkien when possible.",
+  English: "Speak natural, friendly Singapore English. Understand local expressions and code-switching. Reply in English unless the user changes language.",
+  Mandarin: "Speak natural Mandarin Chinese. Reply in Mandarin unless the user changes language."
+};
+
+export default function App() {
+  const pcRef = useRef(null);
+  const channelRef = useRef(null);
+  const micRef = useRef(null);
+  const senderRef = useRef(null);
+  const audioRef = useRef(null);
+  const assistantTextRef = useRef("");
+
+  const [backend, setBackend] = useState("Checking");
+  const [qwen, setQwen] = useState("Unknown");
+  const [webrtc, setWebrtc] = useState("Disconnected");
+  const [dataChannel, setDataChannel] = useState("Disconnected");
+  const [microphone, setMicrophone] = useState("Off");
+  const [audioOutput, setAudioOutput] = useState("Inactive");
+  const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [language, setLanguage] = useState("Auto");
+  const [messages, setMessages] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [error, setError] = useState("");
+
+  function log(message) {
+    const time = new Date().toLocaleTimeString();
+    setLogs((old) => [`${time} — ${message}`, ...old].slice(0, 30));
+  }
+
+  async function checkBackend() {
+    try {
+      const response = await fetch(`${API}/api/health`);
+      if (!response.ok) throw new Error("Backend unavailable");
+
+      const data = await response.json();
+      setBackend("Online");
+      setQwen(data.qwenConfigured ? "Configured" : "Not configured");
+    } catch {
+      setBackend("Offline");
+      setQwen("Unknown");
+    }
+  }
+
+  useEffect(() => {
+    checkBackend();
+    const timer = setInterval(checkBackend, 15000);
+    return () => clearInterval(timer);
+  }, []);
+
+  function sendSessionUpdate(channel, selectedLanguage = language) {
+    if (!channel || channel.readyState !== "open") return;
+
+    channel.send(JSON.stringify({
+      event_id: `gwen_${Date.now()}`,
+      type: "session.update",
+      session: {
+        modalities: ["text", "audio"],
+        instructions: languageInstructions[selectedLanguage],
+        input_audio_transcription: {
+          model: "qwen3-asr-flash-realtime"
+        },
+        turn_detection: {
+          type: "semantic_vad_ec"
+        },
+        audio: {
+          output: {
+            voice: "Tina"
+          }
+        }
+      }
+    }));
+
+    log("Session configuration sent to Qwen");
+  }
+
+  function handleServerEvent(event, channel) {
+    log(`Qwen event: ${event.type}`);
+
+    switch (event.type) {
+      case "session.created":
+        log("Qwen session created");
+        if (micRef.current && senderRef.current) {
+          senderRef.current.replaceTrack(micRef.current);
+        }
+        sendSessionUpdate(channel);
+        break;
+
+      case "session.updated":
+        setConnected(true);
+        setConnecting(false);
+        setQwen("Connected");
+        setMicrophone("On");
+        log("Qwen session is ready");
+        break;
+
+      case "input_audio_buffer.speech_started":
+        log("Speech detected");
+        break;
+
+      case "conversation.item.input_audio_transcription.completed":
+        if (event.transcript) {
+          setMessages((old) => [
+            ...old,
+            { role: "user", text: event.transcript }
+          ]);
+        }
+        break;
+
+      case "response.audio_transcript.delta":
+        assistantTextRef.current += event.delta || "";
+        setAudioOutput("Speaking");
+        setMessages((old) => {
+          const copy = [...old];
+          const last = copy[copy.length - 1];
+
+          if (last?.role === "assistant" && last.streaming) {
+            copy[copy.length - 1] = {
+              ...last,
+              text: assistantTextRef.current
+            };
+          } else {
+            copy.push({
+              role: "assistant",
+              text: assistantTextRef.current,
+              streaming: true
+            });
+          }
+
+          return copy;
+        });
+        break;
+
+      case "response.audio_transcript.done":
+        if (event.transcript) {
+          assistantTextRef.current = event.transcript;
+          setMessages((old) => {
+            const copy = [...old];
+            const last = copy[copy.length - 1];
+
+            if (last?.role === "assistant") {
+              copy[copy.length - 1] = {
+                role: "assistant",
+                text: event.transcript
+              };
+            } else {
+              copy.push({
+                role: "assistant",
+                text: event.transcript
+              });
+            }
+            return copy;
+          });
+        }
+        assistantTextRef.current = "";
+        break;
+
+      case "response.done":
+        setAudioOutput("Ready");
+        break;
+
+      case "error":
+        setError(event.error?.message || "Qwen reported an error");
+        log("Qwen returned an error");
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  function attachDataChannel(channel) {
+    channelRef.current = channel;
+
+    channel.onopen = () => {
+      setDataChannel("Connected");
+      log("DataChannel connected");
+    };
+
+    channel.onclose = () => {
+      setDataChannel("Disconnected");
+      log("DataChannel disconnected");
+    };
+
+    channel.onerror = () => {
+      setDataChannel("Error");
+      log("DataChannel error");
+    };
+
+    channel.onmessage = (message) => {
+      try {
+        const event = JSON.parse(message.data);
+        handleServerEvent(event, channel);
+      } catch {
+        log("Received an unrecognised event");
+      }
+    };
+  }
+
+  function waitForIceGathering(pc) {
+    if (pc.iceGatheringState === "complete") {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      function checkState() {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener(
+            "icegatheringstatechange",
+            checkState
+          );
+          resolve();
+        }
+      }
+
+      pc.addEventListener("icegatheringstatechange", checkState);
+      setTimeout(resolve, 10000);
+    });
+  }
+
+  async function connect() {
+    setError("");
+    setConnecting(true);
+    setWebrtc("Connecting");
+    log("Starting connection");
+
+    try {
+      await checkBackend();
+
+      const health = await fetch(`${API}/api/health`);
+      if (!health.ok) throw new Error("Backend is not available");
+
+      const healthData = await health.json();
+      if (!healthData.qwenConfigured) {
+        throw new Error("Qwen credentials are not configured");
+      }
+
+      log("Requesting microphone permission");
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      micRef.current = stream.getAudioTracks()[0];
+
+      const pc = new RTCPeerConnection();
+      pcRef.current = pc;
+
+      const transceiver = pc.addTransceiver("audio", {
+        direction: "sendrecv"
+      });
+
+      senderRef.current = transceiver.sender;
+
+      attachDataChannel(pc.createDataChannel("oai-events"));
+
+      pc.ondatachannel = (event) => {
+        attachDataChannel(event.channel);
+      };
+
+      pc.ontrack = (event) => {
+        if (audioRef.current) {
+          audioRef.current.srcObject =
+            event.streams[0] ||
+            new MediaStream([event.track]);
+
+          audioRef.current.play().catch(() => {
+            log("Press the speaker control if audio does not autoplay");
+          });
+
+          setAudioOutput("Receiving");
+          log("Remote audio track received");
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        setWebrtc(state);
+
+        if (state === "connected") {
+          log("WebRTC connected");
+        }
+
+        if (state === "failed" || state === "disconnected") {
+          log(`WebRTC ${state}`);
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc);
+
+      log("Sending WebRTC offer to backend");
+
+      const response = await fetch(`${API}/api/realtime/sdp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/sdp"
+        },
+        body: pc.localDescription.sdp
+      });
+
+      const answer = await response.text();
+
+      if (!response.ok) {
+        throw new Error(answer || "Qwen connection request failed");
+      }
+
+      const normalizedAnswer =
+        answer.trim().replace(/\r?\n/g, "\r\n") + "\r\n";
+
+      await pc.setRemoteDescription({
+        type: "answer",
+        sdp: normalizedAnswer
+      });
+
+      setMicrophone("Permission granted");
+      setQwen("Connecting");
+      log("Qwen answer received; waiting for session.created");
+
+    } catch (err) {
+      setError(err.message || "Unable to connect");
+      log(`Connection failed: ${err.message}`);
+      setConnecting(false);
+      setWebrtc("Failed");
+      stopConnection();
+    }
+  }
+
+  function toggleMicrophone() {
+    if (!micRef.current) return;
+
+    micRef.current.enabled = !micRef.current.enabled;
+    setMicrophone(micRef.current.enabled ? "On" : "Muted");
+    log(micRef.current.enabled ? "Microphone enabled" : "Microphone muted");
+  }
+
+  function toggleSpeaker() {
+    if (!audioRef.current) return;
+
+    audioRef.current.muted = !audioRef.current.muted;
+    setMuted(audioRef.current.muted);
+  }
+
+  function changeLanguage(value) {
+    setLanguage(value);
+
+    if (channelRef.current?.readyState === "open") {
+      sendSessionUpdate(channelRef.current, value);
+    }
+  }
+
+  function stopConnection() {
+    if (channelRef.current) {
+      channelRef.current.close();
+      channelRef.current = null;
+    }
+
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    if (micRef.current) {
+      micRef.current.stop();
+      micRef.current = null;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.srcObject = null;
+    }
+
+    senderRef.current = null;
+    setConnected(false);
+    setConnecting(false);
+    setWebrtc("Disconnected");
+    setDataChannel("Disconnected");
+    setMicrophone("Off");
+    setAudioOutput("Inactive");
+    setQwen("Configured");
+    log("Connection closed");
+  }
+
+  function Status({ label, value }) {
+    const good = ["Online", "Connected", "On", "Configured"].includes(value);
+    const bad = ["Offline", "Failed", "Error"].includes(value);
+
+    return (
+      <div className="status-item">
+        <span className={`status-dot ${good ? "good" : bad ? "bad" : ""}`} />
+        <div>
+          <strong>{label}</strong>
+          <small>{value}</small>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      <header className="header">
+        <div>
+          <h1>Gwen AI</h1>
+          <p>Your multilingual voice assistant</p>
+        </div>
+        <span className={`connection-pill ${connected ? "active" : ""}`}>
+          {connected ? "Live" : connecting ? "Connecting..." : "Offline"}
+        </span>
+      </header>
+
+      <section className="dashboard">
+        <h2>System status</h2>
+        <div className="status-grid">
+          <Status label="Backend API" value={backend} />
+          <Status label="Qwen API" value={qwen} />
+          <Status label="WebRTC" value={webrtc} />
+          <Status label="DataChannel" value={dataChannel} />
+          <Status label="Microphone" value={microphone} />
+          <Status label="Audio output" value={audioOutput} />
+          <Status label="WebSocket" value="Not used" />
+        </div>
+      </section>
+
+      <section className="controls">
+        <div>
+          <label htmlFor="language">Conversation language</label>
+          <select
+            id="language"
+            value={language}
+            onChange={(e) => changeLanguage(e.target.value)}
+          >
+            <option value="Auto">Auto detect</option>
+            <option value="English">Singapore English</option>
+            <option value="Mandarin">Mandarin Chinese</option>
+          </select>
+        </div>
+
+        <div className="buttons">
+          {!connected ? (
+            <button
+              className="primary"
+              onClick={connect}
+              disabled={connecting}
+            >
+              {connecting ? "Connecting..." : "Connect to Gwen"}
+            </button>
+          ) : (
+            <>
+              <button onClick={toggleMicrophone}>
+                {microphone === "Muted" ? "Unmute mic" : "Mute mic"}
+              </button>
+              <button onClick={toggleSpeaker}>
+                {muted ? "Unmute speaker" : "Mute speaker"}
+              </button>
+              <button className="danger" onClick={stopConnection}>
+                Disconnect
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+
+      {error && <div className="error">{error}</div>}
+
+      <main className="chat">
+        {messages.length === 0 ? (
+          <div className="welcome">
+            <h2>Hello! 你好！</h2>
+            <p>Connect to Gwen and start speaking.</p>
+            <p>Singapore English and Mandarin are our priorities.</p>
+          </div>
+        ) : (
+          messages.map((message, index) => (
+            <div className={`message ${message.role}`} key={index}>
+              <strong>{message.role === "user" ? "You" : "Gwen AI"}</strong>
+              <p>{message.text}</p>
+            </div>
+          ))
+        )}
+      </main>
+
+      <section className="text-placeholder">
+        Text chat will be connected in the next stage.
+      </section>
+
+      <section className="diagnostics">
+        <h3>Connection event log</h3>
+        <div className="log-list">
+          {logs.length === 0
+            ? <small>No events yet</small>
+            : logs.map((item, index) => <small key={index}>{item}</small>)}
+        </div>
+      </section>
+
+      <audio ref={audioRef} autoPlay />
+
+      <footer>
+        <span>Gwen AI</span>
+        <span>Qwen3.8 Omni Realtime · Singapore</span>
+      </footer>
+    </div>
+  );
+}

@@ -1,0 +1,1291 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import "./App.css";
+import GwenEnquiry from "./components/GwenEnquiry/GwenEnquiry";
+
+const API = import.meta.env.VITE_API_BASE || "http://localhost:3000";
+
+const LANGUAGE_OPTIONS = [
+  { value: "en", label: "English" },
+  { value: "zh", label: "Mandarin Chinese" },
+  { value: "nan", label: "Hokkien (Southern Min)" },
+  { value: "yue", label: "Cantonese" },
+];
+
+const VOICES_BY_LANGUAGE = {
+  en: [{ value: "Tina", label: "Tina" }],
+  zh: [{ value: "Tina", label: "Tina" }],
+  nan: [{ value: "Joseph Chen", label: "Joseph Chen" }],
+  yue: [
+    { value: "Rocky", label: "Rocky" },
+    { value: "Kiki", label: "Kiki" },
+  ],
+};
+
+
+const DEFAULT_VOICE = {
+  en: "Tina",
+  zh: "Tina",
+  nan: "Joseph Chen",
+  yue: "Rocky",
+};
+
+
+
+function buildSessionInstructions(recognitionLanguage, spokenLanguage) {
+  const inputLanguage =
+    recognitionLanguage === "auto"
+      ? "The user may speak any of the supported languages. Understand their speech naturally and preserve the language they use."
+      : `The user's preferred input language is ${
+          LANGUAGE_OPTIONS.find((item) => item.value === recognitionLanguage)?.label
+        }. Understand their speech in that language when possible.`;
+
+  const outputInstructions = {
+    en: "Speak in English.",
+    zh: "Speak in Mandarin Chinese.",
+    nan: "Speak in Hokkien (Southern Min). Use natural conversational phrasing.",
+    yue: "Speak in Cantonese. Use natural conversational phrasing.",
+  };
+
+  return `${inputLanguage} ${outputInstructions[spokenLanguage]} If the user mixes languages, understand the meaning naturally and respond conversationally.`;
+}
+
+
+function getTranscriptText(event) {
+  const directText =
+    event.transcript ||
+    event.text ||
+    event.transcription ||
+    event.item?.transcript;
+  if (typeof directText === "string" && directText.trim()) return directText;
+
+  const content = event.item?.content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((part) => part.transcript || part.text || "")
+    .filter((text) => typeof text === "string")
+    .join("")
+    .trim();
+}
+
+function getResponseText(response) {
+  const output = response?.output;
+  if (!Array.isArray(output)) return "";
+
+  return output
+    .flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((part) => part.transcript || part.text || "")
+    .filter((text) => typeof text === "string")
+    .join("")
+    .trim();
+}
+
+export default function App() {
+  const userTranscriptRef = useRef("");
+  const assistantTranscriptRef = useRef("");
+  const assistantTranscriptSourceRef = useRef("");
+  const assistantHasTranscriptRef = useRef(false);
+  const [showAvatar, setShowAvatar] = useState(false);
+  
+  const seenEventIdsRef = useRef(new Set());
+  const [backendStatus, setBackendStatus] = useState("checking");
+  const [qwenStatus, setQwenStatus] = useState("unknown");
+  const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [speakerMuted, setSpeakerMuted] = useState(false);
+  const [volume, setVolume] = useState(80);
+  const [recognitionLanguage, setRecognitionLanguage] = useState("auto");
+  const [spokenLanguage, setSpokenLanguage] = useState("en");
+  const [voice, setVoice] = useState("Tina");
+  const [theme, setTheme] = useState("dark");
+  const [messages, setMessages] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [error, setError] = useState("");
+  const [assistantSpeaking, setAssistantSpeaking] = useState(false);
+
+  const [avatarState, setAvatarState] = useState("idle");
+
+  const [liveUserText, setLiveUserText] = useState("");
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false);
+
+  const transcriptListRef = useRef(null);
+  const isNearTranscriptBottomRef = useRef(true);
+
+  const peerRef = useRef(null);
+  const channelRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const audioRef = useRef(null);
+  const addLog = useCallback((message) => {
+    const time = new Date().toLocaleTimeString();
+    setLogs((current) => [...current.slice(-79), { time, message }]);
+  }, []);
+
+  const addMessage = useCallback((role, text) => {
+    if (!text?.trim()) return;
+    setMessages((current) => [
+      ...current,
+      {
+        id: `${Date.now()}-${Math.random()}`,
+        role,
+        text: text.trim(),
+        time: new Date().toLocaleTimeString(),
+      },
+    ]);
+  }, []);
+
+  const sendEvent = useCallback((event) => {
+    const channel = channelRef.current;
+    if (!channel || channel.readyState !== "open") {
+      addLog("Cannot send event: data channel is not open.");
+      return;
+    }
+
+    channel.send(JSON.stringify(event));
+  }, [addLog]);
+
+  const sendSessionUpdate = useCallback(() => {
+      sendEvent({
+        type: "session.update",
+        session: {
+          modalities: ["text", "audio"],
+          audio: {
+            output: {
+              voice,
+            },
+          },
+          instructions: buildSessionInstructions(
+            recognitionLanguage,
+            spokenLanguage
+          ),
+          input_audio_transcription: {
+            model: "qwen3-asr-flash-realtime",
+          },
+          turn_detection: {
+            type: "server_vad",
+          },
+        },
+      });
+
+      addLog(
+        `Session update sent. Input preference: ${recognitionLanguage}. Output: ${spokenLanguage}. Voice: ${voice}.`
+      );
+    }, [
+      recognitionLanguage,
+      spokenLanguage,
+      voice,
+      sendEvent,
+      addLog,
+    ]);
+
+  const checkBackend = useCallback(async () => {
+    try {
+      const response = await fetch(`${API}/api/health`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const data = await response.json();
+      setBackendStatus("online");
+
+      const configured =
+        data.qwenConfigured ??
+        data.qwen_configured ??
+        data.qwen ??
+        data.configured;
+
+      setQwenStatus(
+        configured === true || configured === "true"
+          ? "configured"
+          : configured === false || configured === "false"
+            ? "missing"
+            : "unknown"
+      );
+    } catch (err) {
+      setBackendStatus("offline");
+      setQwenStatus("unknown");
+      addLog(`Backend health check failed: ${err.message}`);
+    }
+  }, [addLog]);
+
+  useEffect(() => {
+    checkBackend();
+  }, [checkBackend]);
+
+  useEffect(() => {
+    if (isNearTranscriptBottomRef.current) {
+      const transcript = transcriptListRef.current;
+      transcript?.scrollTo({
+        top: transcript.scrollHeight,
+        behavior: "smooth",
+      });
+    }
+  }, [messages, liveUserText]);
+
+  const handleTranscriptScroll = () => {
+    const element = transcriptListRef.current;
+    if (!element) return;
+
+    const nearBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 100;
+
+    isNearTranscriptBottomRef.current = nearBottom;
+    setShowJumpToLatest(!nearBottom);
+  };
+
+  const jumpToLatest = () => {
+    isNearTranscriptBottomRef.current = true;
+    const transcript = transcriptListRef.current;
+    transcript?.scrollTo({
+      top: transcript.scrollHeight,
+      behavior: "smooth",
+    });
+    setShowJumpToLatest(false);
+  };
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume / 100;
+      audioRef.current.muted = speakerMuted;
+    }
+  }, [volume, speakerMuted]);
+
+  
+  const startNewConversation = () => {
+    setMessages([]);
+    setLiveUserText("");
+    userTranscriptRef.current = "";
+    assistantTranscriptRef.current = "";
+    assistantTranscriptSourceRef.current = "";
+    assistantHasTranscriptRef.current = false;
+    seenEventIdsRef.current.clear();
+    isNearTranscriptBottomRef.current = true;
+    setShowJumpToLatest(false);
+    setError("");
+    addLog("Transcript cleared.");
+  };
+
+  const toggleMicrophone = () => {
+    const stream = micStreamRef.current;
+
+    if (!stream) {
+      addLog("Microphone stream is unavailable.");
+      return;
+    }
+
+    const nextMuted = !muted;
+
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = !nextMuted;
+    });
+
+    setMuted(nextMuted);
+    addLog(nextMuted ? "Microphone muted." : "Microphone unmuted.");
+  };
+
+  const startConnection = async () => {
+    if (connecting || connected) return;
+
+    setConnecting(true);
+    setError("");
+
+    try {
+      addLog("Requesting microphone access...");
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+
+      micStreamRef.current = stream;
+
+      const peer = new RTCPeerConnection();
+      peerRef.current = peer;
+
+      stream.getTracks().forEach((track) => {
+        peer.addTrack(track, stream);
+      });
+
+      peer.ontrack = (event) => {
+        if (audioRef.current) {
+          audioRef.current.srcObject = event.streams[0];
+          audioRef.current.play().catch((err) => {
+            addLog(`Audio playback issue: ${err.message}`);
+          });
+        }
+      };
+
+      peer.onconnectionstatechange = () => {
+        const state = peer.connectionState;
+
+        addLog(`WebRTC state: ${state}`);
+
+        if (state === "connected") {
+          setConnected(true);
+          setConnecting(false);
+        }
+
+        if (
+          state === "failed" ||
+          state === "closed" ||
+          state === "disconnected"
+        ) {
+          setConnected(false);
+          setConnecting(false);
+          setAssistantSpeaking(false);
+          setAvatarState("idle");
+        }
+      };
+
+      const attachDataChannel = (channel) => {
+        channelRef.current = channel;
+
+        channel.onopen = () => {
+          addLog("Data channel connected.");
+          setConnected(true);
+          setConnecting(false);
+        };
+
+        // channel.onclose = () => {
+        //   addLog("Data channel closed.");
+        //   if (channelRef.current === channel) channelRef.current = null;
+        //   setConnected(false);
+        //   setConnecting(false);
+        //   setAssistantSpeaking(false);
+        // };
+        channel.onclose = () => {
+          addLog("Data channel closed.");
+          if (channelRef.current === channel) channelRef.current = null;
+          setConnected(false);
+          setConnecting(false);
+          setAssistantSpeaking(false);
+          setAvatarState("idle");
+        };
+
+        channel.onerror = () => {
+          addLog("Data channel error.");
+        };
+
+        channel.onmessage = (message) => {
+          try {
+            const event = JSON.parse(message.data);
+            if (event.event_id && seenEventIdsRef.current.has(event.event_id)) {
+              return;
+            }
+            if (event.event_id) seenEventIdsRef.current.add(event.event_id);
+
+            if (
+              event.type?.includes("transcript") ||
+              event.type?.startsWith("response.")
+            ) {
+              addLog(`Qwen event: ${event.type}`);
+            }
+            if (
+              event.type === "response.audio_transcript.delta" ||
+              event.type === "response.text.delta"
+            ) {
+              addLog(`Assistant text received: ${event.delta || "(empty delta)"}`);
+            }
+
+            handleServerEvent(event);
+          } catch (err) {
+            addLog(`Event parsing error: ${err.message}`);
+          }
+        };
+      };
+
+      attachDataChannel(peer.createDataChannel("oai-events"));
+      peer.ondatachannel = (event) => {
+        addLog("Remote data channel received.");
+        attachDataChannel(event.channel);
+      };
+
+      addLog("Creating WebRTC offer...");
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+
+      // Wait for ICE gathering to complete before sending the SDP.
+      if (peer.iceGatheringState !== "complete") {
+        await new Promise((resolve) => {
+          const onGatheringChange = () => {
+            if (peer.iceGatheringState === "complete") {
+              peer.removeEventListener(
+                "icegatheringstatechange",
+                onGatheringChange
+              );
+              resolve();
+            }
+          };
+
+          peer.addEventListener(
+            "icegatheringstatechange",
+            onGatheringChange
+          );
+        });
+      }
+
+      addLog("Sending SDP offer to backend...");
+
+      const response = await fetch(`${API}/api/realtime/sdp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/sdp",
+        },
+        body: peer.localDescription.sdp,
+      });
+
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        throw new Error(responseText || `Backend error: ${response.status}`);
+      }
+
+      let answerSdp = responseText;
+
+      try {
+        const parsed = JSON.parse(responseText);
+        if (parsed.sdp) answerSdp = parsed.sdp;
+      } catch {
+        // The backend returned plain SDP.
+      }
+
+      await peer.setRemoteDescription({
+        type: "answer",
+        sdp: answerSdp,
+      });
+
+      addLog("WebRTC answer received. Waiting for Qwen session...");
+    } catch (err) {
+        addLog(`Connection failed: ${err.message}`);
+        setError(err.message);
+        setConnecting(false);
+        setConnected(false);
+        setAssistantSpeaking(false);
+        setAvatarState("idle");
+
+        channelRef.current?.close();
+        channelRef.current = null;
+
+        peerRef.current?.close();
+        peerRef.current = null;
+
+        micStreamRef.current?.getTracks().forEach((track) => track.stop());
+        micStreamRef.current = null;
+      }
+  };
+
+  const stopConnection = useCallback(() => {
+    addLog("Closing voice connection...");
+
+    if (channelRef.current) {
+      channelRef.current.close();
+      channelRef.current = null;
+    }
+
+    if (peerRef.current) {
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.srcObject = null;
+    }
+
+    setAvatarState("idle");
+    setConnected(false);
+    setConnecting(false);
+    setMuted(false);
+    setAssistantSpeaking(false);
+    addLog("Voice connection closed.");
+  }, [addLog]);
+
+  useEffect(() => {
+    return () => {
+      channelRef.current?.close();
+      peerRef.current?.close();
+      micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  const handleServerEvent = useCallback((event) => {
+    if (typeof event.type !== "string") return;
+
+    addLog(`Qwen event: ${event.type}`);
+
+    const isAssistantTextDelta = [
+      "response.audio_transcript.delta",
+      "response.text.delta",
+      "response.output_audio_transcript.delta",
+      "response.output_text.delta",
+    ].includes(event.type);
+    const isAssistantTextDone = [
+      "response.audio_transcript.done",
+      "response.text.done",
+      "response.output_audio_transcript.done",
+      "response.output_text.done",
+    ].includes(event.type);
+
+    if (isAssistantTextDelta || isAssistantTextDone) {
+      const source = event.type.includes("audio_transcript")
+        ? "audio-transcript"
+        : "text";
+      const activeSource = assistantTranscriptSourceRef.current;
+      if (
+        activeSource === "audio-transcript" &&
+        source === "text"
+      ) {
+        return;
+      }
+      if (
+        activeSource === "text" &&
+        source === "audio-transcript"
+      ) {
+        assistantTranscriptRef.current = "";
+      }
+      assistantTranscriptSourceRef.current = source;
+
+      if (isAssistantTextDelta) {
+        const delta = typeof event.delta === "string" ? event.delta : "";
+        if (!delta) return;
+
+        assistantTranscriptRef.current += delta;
+        assistantHasTranscriptRef.current = true;
+        setAssistantSpeaking(true);
+        setMessages((current) => {
+          const updated = [...current];
+          const last = updated[updated.length - 1];
+
+          if (last?.role === "assistant" && last.streaming) {
+            updated[updated.length - 1] = {
+              ...last,
+              text: assistantTranscriptRef.current,
+            };
+          } else {
+            updated.push({
+              id: `${Date.now()}-${Math.random()}`,
+              role: "assistant",
+              text: assistantTranscriptRef.current,
+              time: new Date().toLocaleTimeString(),
+              streaming: true,
+            });
+          }
+
+          return updated;
+        });
+        return;
+      }
+
+      const finalText = event.transcript || event.text || assistantTranscriptRef.current;
+      if (finalText.trim()) {
+        assistantHasTranscriptRef.current = true;
+        setMessages((current) => {
+          const updated = [...current];
+          const last = updated[updated.length - 1];
+
+          if (last?.role === "assistant") {
+            updated[updated.length - 1] = {
+              ...last,
+              text: finalText,
+              streaming: false,
+            };
+          } else {
+            updated.push({
+              id: `${Date.now()}-${Math.random()}`,
+              role: "assistant",
+              text: finalText,
+              time: new Date().toLocaleTimeString(),
+            });
+          }
+
+          return updated;
+        });
+      }
+
+      assistantTranscriptRef.current = "";
+      assistantTranscriptSourceRef.current = "";
+      setAssistantSpeaking(false);
+      return;
+    }
+
+    switch (event.type) {
+      case "session.created":
+        addLog("Qwen session created.");
+        sendSessionUpdate();
+        break;
+
+      case "session.updated":
+        setConnected(true);
+        setConnecting(false);
+        addLog("Qwen session is ready.");
+        break;
+
+      case "input_audio_buffer.speech_started":
+        userTranscriptRef.current = "";
+        setLiveUserText("");
+        setAvatarState("listening");
+        addLog("User speech detected.");
+        break;
+
+      case "input_audio_buffer.speech_stopped":
+        setAvatarState("thinking");
+        break;
+
+      case "conversation.item.input_audio_transcription.delta": {
+        let partial;
+
+        if (typeof event.delta === "string") {
+          userTranscriptRef.current += event.delta;
+          partial = userTranscriptRef.current;
+        } else {
+          partial = `${event.text || ""}${event.stash || ""}`;
+          userTranscriptRef.current = partial;
+        }
+
+        setLiveUserText(partial);
+        addLog(`User transcript update: ${partial || "(empty)"}`);
+        break;
+      }
+
+      case "conversation.item.input_audio_transcription.completed": {
+        const transcript = getTranscriptText(event);
+
+        addLog(`User transcript completed: ${transcript || "(empty)"}`);
+
+        if (transcript.trim()) {
+          addMessage("user", transcript);
+        }
+
+        userTranscriptRef.current = "";
+        setLiveUserText("");
+        break;
+      }
+
+
+
+      case "response.created":
+        assistantTranscriptRef.current = "";
+        assistantTranscriptSourceRef.current = "";
+        assistantHasTranscriptRef.current = false;
+        setAssistantSpeaking(true);
+        setAvatarState("thinking");
+        break;
+
+      case "response.audio.delta":
+        setAssistantSpeaking(true);
+        setAvatarState("speaking");
+        break;
+
+      case "response.done":
+        // setAvatarState("idle");
+        setAvatarState(connected ? "listening" : "idle");
+        setAssistantSpeaking(false);
+        if (!assistantHasTranscriptRef.current) {
+          const responseText = getResponseText(event.response);
+          if (responseText) {
+            addMessage("assistant", responseText);
+            assistantHasTranscriptRef.current = true;
+          }
+        }
+        setMessages((current) => {
+          const updated = [...current];
+          const last = updated[updated.length - 1];
+          if (last?.role === "assistant" && last.streaming) {
+            updated[updated.length - 1] = { ...last, streaming: false };
+          }
+          return updated;
+        });
+        break;
+
+      case "conversation.item.input_audio_transcription.failed":
+        addLog(
+          `Input transcription failed: ${
+            event.error?.message || "Unknown error"
+          }`
+        );
+        break;
+
+      case "error":
+        setAssistantSpeaking(false);
+        setError(event.error?.message || "Qwen returned an error.");
+        addLog(`Qwen error: ${event.error?.message || "Unknown error"}`);
+        break;
+
+      default:
+        break;
+    }
+  }, [addLog, addMessage, sendSessionUpdate, connected]);
+
+
+ const changeRecognitionLanguage = (value) => {
+  setRecognitionLanguage(value);
+
+  if (connected) {
+    sendEvent({
+      type: "session.update",
+      session: {
+        instructions: buildSessionInstructions(value, spokenLanguage),
+      },
+    });
+  }
+
+  addLog(`Preferred input language changed to ${value}.`);
+};
+
+const changeSpokenLanguage = (value) => {
+  const nextVoice = DEFAULT_VOICE[value];
+
+  setSpokenLanguage(value);
+  setVoice(nextVoice);
+
+  if (connected) {
+    sendEvent({
+      type: "session.update",
+      session: {
+        instructions: buildSessionInstructions(
+          recognitionLanguage,
+          value
+        ),
+        audio: {
+          output: {
+            voice: nextVoice,
+          },
+        },
+      },
+    });
+  }
+
+  addLog(`Spoken language changed to ${value}. Voice: ${nextVoice}.`);
+};
+
+const changeVoice = (value) => {
+      setVoice(value);
+
+      if (connected) {
+        sendEvent({
+          type: "session.update",
+          session: {
+            audio: {
+              output: {
+                voice: value,
+              },
+            },
+          },
+        });
+      }
+
+      addLog(`Voice changed to ${value}.`);
+    };
+   
+  return (
+    <main className={`gwen-app ${theme}`}>
+      <audio ref={audioRef} autoPlay />
+
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">G</div>
+          <div>
+            <h1>Gwen AI</h1>
+            <span>Your AI voice companion</span>
+          </div>
+        </div>
+
+        <div className="topbar-actions">
+          <div className={`connection-pill ${connected ? "is-online" : ""}`}>
+            <span className="status-dot" />
+            {connected ? "Connected" : connecting ? "Connecting" : "Offline"}
+          </div>
+
+        <button
+          className="avatar-menu-button"
+          onClick={() => setShowAvatar(true)}
+          title="Open Gwen's avatar"
+        >
+          ✦ Gwen Avatar
+        </button>
+
+          <button
+            className="icon-button settings-menu-button"
+            onClick={() => setShowSettings(true)}
+            aria-label="Open settings"
+            title="Settings and diagnostics"
+          >
+            ⚙
+          </button>
+
+
+          <button
+            className="icon-button"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            title="Toggle theme"
+            aria-label="Toggle theme"
+          >
+            {theme === "dark" ? "☀" : "☾"}
+          </button>
+        </div>
+      </header>
+
+
+      <div className="system-strip">
+        <StatusRow label="Backend" status={backendStatus} />
+        <StatusRow label="Qwen" status={qwenStatus} />
+        <StatusRow
+          label="WebRTC"
+          status={connected ? "connected" : "offline"}
+        />
+        <StatusRow
+          label="Data channel"
+          status={channelRef.current?.readyState === "open" ? "connected" : "offline"}
+        />
+      </div>
+      <div className="app-layout">
+        <section className="conversation-panel">
+          <div className="conversation-heading">
+            <div>
+              <p className="eyebrow">REALTIME AI</p>
+              <h2>Voice conversation</h2>
+              <p className="subheading">
+                Talk naturally with Gwen, powered by Qwen.
+              </p>
+            </div>
+            <button className="text-button" onClick={startNewConversation}>
+              + New conversation
+            </button>
+          </div>
+
+          <div className={`voice-stage ${connected ? "active" : ""}`}>
+            <div className={`voice-orb ${assistantSpeaking ? "speaking" : ""}`}>
+              <div className="orb-core">G</div>
+              <span className="orb-ring ring-one" />
+              <span className="orb-ring ring-two" />
+              <span className="orb-ring ring-three" />
+            </div>
+
+            <h3>
+              {assistantSpeaking
+                ? "Gwen is speaking"
+                : connected
+                  ? muted
+                    ? "Microphone muted"
+                    : "Listening to you"
+                  : connecting
+                    ? "Connecting to Gwen..."
+                    : "Ready when you are"}
+            </h3>
+            <p>
+              {connected
+                ? "Speak naturally. Gwen is listening."
+                : "Start a voice session to begin your conversation."}
+            </p>
+
+            <div className="voice-controls">
+              {!connected ? (
+                <button
+                  className="primary-button start-button"
+                  onClick={startConnection}
+                  disabled={connecting}
+                >
+                  {connecting ? "Connecting..." : "Start conversation"}
+                </button>
+              ) : (
+                <>
+                  <button
+                    className={`round-control ${muted ? "selected" : ""}`}
+                    onClick={toggleMicrophone}
+                    title={muted ? "Unmute microphone" : "Mute microphone"}
+                    aria-label={muted ? "Unmute microphone" : "Mute microphone"}
+                  >
+                    {muted ? "Mic off" : "Mic on"}
+                  </button>
+                  <button
+                    className="primary-button end-button"
+                    onClick={stopConnection}
+                  >
+                    End conversation
+                  </button>
+                  <button
+                    className={`round-control ${speakerMuted ? "selected" : ""}`}
+                    onClick={() => setSpeakerMuted((value) => !value)}
+                    title={speakerMuted ? "Unmute speaker" : "Mute speaker"}
+                    aria-label={speakerMuted ? "Unmute speaker" : "Mute speaker"}
+                  >
+                    {speakerMuted ? "Sound off" : "Sound on"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <div className="error-banner">
+              <strong>Connection issue:</strong> {error}
+              <button onClick={() => setError("")} aria-label="Dismiss error">
+                ×
+              </button>
+            </div>
+          )}
+
+          <section className={`transcript-section ${transcriptExpanded ? "expanded" : ""}`}>
+            <div className="section-heading">
+              <div>
+                <h3>Conversation</h3>
+                <span>{messages.length} messages</span>
+              </div>
+
+              <div className="transcript-actions">
+                <button
+                  className="text-button"
+                  onClick={() => setTranscriptExpanded((value) => !value)}
+                >
+                  {transcriptExpanded ? "Restore view" : "Expand transcript"}
+                </button>
+
+                <button className="text-button" onClick={startNewConversation}>
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div
+              className="transcript-list"
+              ref={transcriptListRef}
+              onScroll={handleTranscriptScroll}
+            >          
+              {messages.length === 0 && !liveUserText ? (
+                <div className="empty-transcript">
+                  <div className="empty-icon">✦</div>
+                  <p>Your conversation will appear here.</p>
+                  <span>Start a voice session and say hello to Gwen.</span>
+                </div>
+              ) : (
+                <>
+                  {messages.map((message) => (
+                    <article
+                      className={`message ${message.role} ${message.streaming ? "streaming" : ""}`}
+                      key={message.id}
+                    >
+                      <div className="message-avatar">
+                        {message.role === "assistant" ? "G" : "You"}
+                      </div>
+
+                      <div className="message-content">
+                        <div className="message-meta">
+                          <strong>
+                            {message.role === "assistant" ? "Gwen" : "You"}
+                          </strong>
+                          <time>{message.streaming ? "Speaking…" : message.time}</time>
+                        </div>
+                        <p>{message.text}</p>
+                      </div>
+                    </article>
+                  ))}
+
+                  {liveUserText && (
+                    <article className="message user live-message">
+                      <div className="message-avatar">You</div>
+                      <div className="message-content">
+                        <div className="message-meta">
+                          <strong>You</strong>
+                          <time>Listening…</time>
+                        </div>
+                        <p>{liveUserText}</p>
+                      </div>
+                    </article>
+                  )}
+                </>
+              )}
+            </div>
+
+            {showJumpToLatest && (
+              <button className="jump-latest-button" onClick={jumpToLatest}>
+                ↓ Jump to latest
+              </button>
+            )}
+          </section>
+        </section>
+
+        <aside className={`settings-panel settings-drawer ${showSettings ? "open" : ""}`}>
+          
+          <div className="drawer-heading">
+            <h2>Settings & diagnostics</h2>
+            <button
+              className="icon-button"
+              onClick={() => setShowSettings(false)}
+              aria-label="Close settings"
+            >
+              ×
+            </button>
+          </div>
+          
+          <section className="settings-card">
+            <div className="card-heading">
+              <h3>Voice settings</h3>
+              <span className="settings-icon">⚙</span>
+              </div>
+
+            <label className="field-label" htmlFor="recognitionLanguage">
+            Preferred input language
+          </label>
+      <select
+        id="recognitionLanguage"
+        value={recognitionLanguage}
+        onChange={(event) =>
+          changeRecognitionLanguage(event.target.value)
+        }
+      >
+        <option value="auto">Auto detect</option>
+        {LANGUAGE_OPTIONS.map((item) => (
+          <option key={item.value} value={item.value}>
+            {item.label}
+          </option>
+        ))}
+      </select>
+
+    <p className="setting-hint">
+      This guides Gwen's understanding of your speech. Automatic
+      recognition remains enabled.
+    </p>
+
+  <label className="field-label" htmlFor="spokenLanguage">
+    Spoken response language
+  </label>
+  <select
+    id="spokenLanguage"
+    value={spokenLanguage}
+    onChange={(event) =>
+      changeSpokenLanguage(event.target.value)
+    }
+  >
+    {LANGUAGE_OPTIONS.map((item) => (
+      <option key={item.value} value={item.value}>
+        {item.label}
+      </option>
+    ))}
+  </select>
+
+`1<label className="field-label" htmlFor="voice">
+  Gwen's voice
+</label>
+<select
+  id="voice"
+  value={voice}
+  onChange={(event) => changeVoice(event.target.value)}
+>
+  {(VOICES_BY_LANGUAGE[spokenLanguage] || []).map((item) => (
+    <option key={item.value} value={item.value}>
+      {item.label}
+    </option>
+  ))}
+</select>
+
+<div className="language-support">
+  <h4>Language support</h4>
+  <div className="language-support-header">
+    <span>Language</span>
+    <span>Recognise</span>
+    <span>Speak</span>
+  </div>
+
+  {LANGUAGE_OPTIONS.map((item) => (
+    <div className="language-support-row" key={item.value}>
+      <span>{item.label}</span>
+      <span className="support-yes">Supported</span>
+      <span className="support-yes">Supported</span>
+    </div>
+  ))}
+</div>
+
+            <label className="field-label volume-label" htmlFor="volume">
+              Speaker volume <strong>{volume}%</strong>
+            </label>
+            <input
+              id="volume"
+              className="volume-slider"
+              type="range"
+              min="0"
+              max="100"
+              value={volume}
+              onChange={(event) => setVolume(Number(event.target.value))}
+            />
+          </section>
+
+          <section className="settings-card status-card">
+            <div className="card-heading">
+              <h3>System status</h3>
+              <button className="refresh-button" onClick={checkBackend}>
+                Refresh
+              </button>
+            </div>
+
+            <StatusRow label="Node.js backend" status={backendStatus} />
+            <StatusRow label="Qwen API key" status={qwenStatus} />
+            <StatusRow
+              label="WebRTC session"
+              status={connected ? "connected" : "offline"}
+            />
+            <StatusRow
+              label="Data channel"
+              status={
+                channelRef.current?.readyState === "open" ? "connected" : "offline"
+              }
+            />
+          </section>
+
+          <section className="settings-card diagnostics-card">
+            <button
+              className="diagnostics-toggle"
+              onClick={() => setShowDiagnostics((value) => !value)}
+            >
+              <span>Connection diagnostics</span>
+              <span>{showDiagnostics ? "−" : "+"}</span>
+            </button>
+
+            {showDiagnostics && (
+              <div className="diagnostics-content">
+                <div className="diagnostics-toolbar">
+                  <span>Recent events</span>
+                  <button onClick={() => setLogs([])}>Clear</button>
+                </div>
+                <div className="log-list">
+                  {logs.length === 0 ? (
+                    <p className="no-logs">No events recorded.</p>
+                  ) : (
+                    logs.map((log, index) => (
+                      <div className="log-entry" key={`${log.time}-${index}`}>
+                        <time>{log.time}</time>
+                        <span>{log.message}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+
+          <p className="privacy-note">
+            <span>●</span> Your Qwen API credentials stay on your backend.
+          </p>
+
+          <button
+            className="drawer-done-button"
+            onClick={() => setShowSettings(false)}
+          >
+            Done
+          </button>
+        </aside>
+
+        {showSettings && (
+          <button
+            className="drawer-backdrop"
+            aria-label="Close settings"
+            onClick={() => setShowSettings(false)}
+          />
+        )}
+
+      </div>
+      {showAvatar && (
+        <div
+          className="avatar-backdrop"
+          onClick={() => setShowAvatar(false)}
+        >
+          <section
+            className={`avatar-modal avatar-${avatarState}`}
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Gwen AI avatar"
+          >
+            <button
+              className="avatar-close"
+              onClick={() => setShowAvatar(false)}
+              aria-label="Close avatar"
+            >
+              ×
+            </button>
+
+            <div className="avatar-title">
+              <span className="avatar-status-dot" />
+              <div>
+                <h2>Gwen</h2>
+                <p>Your AI voice companion</p>
+              </div>
+            </div>
+
+            <div className="gwen-character">
+              <div className="character-hair-back" />
+              <div className="character-neck" />
+              <div className="character-body">
+                <div className="character-collar" />
+              </div>
+              <div className="character-head">
+                <div className="character-hair-top" />
+                <div className="character-bangs" />
+                <div className="character-eyes">
+                  <span />
+                  <span />
+                </div>
+                <div className="character-cheeks">
+                  <span />
+                  <span />
+                </div>
+                <div className="character-mouth" />
+              </div>
+            </div>
+
+            <div className="avatar-caption">
+              <h3>
+                {avatarState === "speaking"
+                  ? "Gwen is speaking"
+                  : avatarState === "thinking"
+                    ? "Gwen is thinking"
+                    : avatarState === "listening"
+                      ? "Listening to you"
+                      : connected
+                        ? "I'm here with you"
+                        : "Ready when you are"}
+              </h3>
+
+              <p>
+                {messages.filter((message) => message.role === "assistant").at(-1)?.text
+                  || "Start a conversation with Gwen."}
+              </p>
+            </div>
+          </section>
+        </div>
+      )}
+      <footer className="app-footer">
+        <span>Gwen AI</span>
+        <span>Realtime voice experience</span>
+      </footer>
+    </main>
+  );
+}
+
+function StatusRow({ label, status }) {
+  const isGood = ["online", "configured", "connected"].includes(status);
+  const display = {
+    online: "Online",
+    configured: "Configured",
+    connected: "Connected",
+    offline: "Offline",
+    missing: "Not configured",
+    unknown: "Unknown",
+    checking: "Checking...",
+  }[status] || status;
+
+  return (
+    <div className="status-row">
+      <span>{label}</span>
+      <span className={`status-value ${isGood ? "good" : ""}`}>
+        <i className="status-dot" />
+        {display}
+      </span>
+    </div>
+  );
+}

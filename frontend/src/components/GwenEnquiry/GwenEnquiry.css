@@ -1,0 +1,82 @@
+
+.gwen-enquiry {
+  width: 100%;
+  max-width: 600px;
+  margin: 24px auto;
+  padding: 24px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+  box-sizing: border-box;
+}
+
+.gwen-enquiry-header h2 {
+  margin: 0 0 8px;
+  color: #111827;
+}
+
+.gwen-enquiry-header p {
+  margin: 0 0 20px;
+  color: #6b7280;
+}
+
+.gwen-enquiry form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gwen-enquiry label {
+  font-weight: 600;
+  color: #374151;
+}
+
+.gwen-enquiry textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  resize: vertical;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.gwen-enquiry textarea:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.gwen-enquiry button {
+  padding: 12px 18px;
+  border: none;
+  border-radius: 8px;
+  background: #4f46e5;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gwen-enquiry button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.gwen-enquiry-success,
+.gwen-enquiry-error {
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.gwen-enquiry-success {
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.gwen-enquiry-error {
+  background: #fef2f2;
+  color: #991b1b;
+}
