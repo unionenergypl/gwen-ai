@@ -105,6 +105,6 @@ app.post("/api/realtime/sdp", async (req, res) => {
 
 const port = process.env.PORT || 3000;
 
-app.listen(port, () => {
+app.listen(port, "0.0.0.0", () => {
   console.log(`Gwen AI backend running at http://localhost:${port}`);
 });
