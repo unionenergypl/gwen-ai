@@ -1,3 +1,4 @@
+import { apiFetch } from "./apiClient";
 
 export async function sendEnquiryToN8n(
   userMessage,
@@ -5,14 +6,13 @@ export async function sendEnquiryToN8n(
   sessionId
 ) {
   try {
-    const response = await fetch("/api/gwen/enquiry", {
+    const response = await apiFetch("/api/gwen/enquiry", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
         message: userMessage,
-        userId,
         sessionId
       })
     });

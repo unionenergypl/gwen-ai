@@ -3,8 +3,19 @@ require("dotenv").config();
 const gwenEnquiryRoutes = require("./routes/gwenEnquiry");
 const express = require("express");
 const cors = require("cors");
+const authRoutes = require("./routes/auth");
+const authenticate = require("./middleware/authenticate");
+const requireApprovedUser = require("./middleware/requireApprovedUser");
+const path = require("path");
+const speechRoutes = require("./routes/speech");
+const gwenSalesRoutes = require("./routes/gwenSales");
 
 const app = express();
+
+// Trust the Azure Sandbox reverse proxy
+app.set("trust proxy", 1);
+
+
 
 app.use(cors({
   origin: process.env.FRONTEND_ORIGIN || "http://localhost:5173"
@@ -16,9 +27,13 @@ app.use(express.text({
 }));
 
 app.use(express.json({ limit: "2mb" }));
+app.use("/api/auth", authRoutes);
 
 // NEW: Gwen → n8n enquiry integration
 app.use("/api/gwen", gwenEnquiryRoutes);
+
+
+app.use("/api/gwen", gwenSalesRoutes);
 
 
 const rateLimit = require("express-rate-limit");
@@ -30,6 +45,13 @@ const realtimeLimiter = rateLimit({
   legacyHeaders: false,
   message: "Too many connection requests. Please try again later."
 });
+
+
+app.use("/api/gwen/speech", speechRoutes);
+
+// Existing enquiry integration — leave unchanged.
+app.use("/api/gwen", gwenEnquiryRoutes);
+
 
 app.use(
   "/api/realtime/sdp",
@@ -51,7 +73,11 @@ app.get("/api/health", (req, res) => {
 
 // Exchange the browser's WebRTC offer with Qwen.
 // The API key remains on the backend.
-app.post("/api/realtime/sdp", async (req, res) => {
+app.post(
+  "/api/realtime/sdp",
+  authenticate,
+  requireApprovedUser,
+  async (req, res) => {
   try {
     const {
       QWEN_API_KEY,
@@ -101,6 +127,25 @@ app.post("/api/realtime/sdp", async (req, res) => {
     console.error("Backend error:", error);
     res.status(500).send("Unable to connect to Qwen.");
   }
+});
+
+// Serve the React production build
+const frontendDist = path.join(__dirname, "../frontend/dist");
+
+app.use(express.static(frontendDist));
+
+// Support React client-side routes
+app.use((req, res, next) => {
+  if (req.method !== "GET" || req.path.startsWith("/api/")) {
+    return next();
+  }
+
+  res.sendFile(
+    path.join(frontendDist, "index.html"),
+    (error) => {
+      if (error) next(error);
+    }
+  );
 });
 
 const port = process.env.PORT || 3000;

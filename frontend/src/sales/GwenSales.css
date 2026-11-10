@@ -1,0 +1,280 @@
+
+.gwen-sales {
+  min-height: 100vh;
+  background: #f3f5f9;
+  color: #202b3c;
+  font-family: Inter, Arial, sans-serif;
+}
+
+.gs-header {
+  height: 72px;
+  padding: 0 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: white;
+  border-bottom: 1px solid #e5e9f0;
+}
+
+.gs-brand,
+.gs-account,
+.gs-chat-header {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.gs-logo,
+.gs-avatar {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #4383ed, #193c9c);
+  color: white;
+  font-weight: 800;
+}
+
+.gs-brand strong {
+  display: block;
+  letter-spacing: 2px;
+}
+
+.gs-brand small,
+.gs-chat-header small {
+  display: block;
+  margin-top: 4px;
+  color: #8792a3;
+  font-size: 11px;
+}
+
+.gs-account {
+  color: #667085;
+  font-size: 12px;
+}
+
+.gs-account button {
+  padding: 8px 12px;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+}
+
+.gs-layout {
+  max-width: 1600px;
+  margin: auto;
+  padding: 22px;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 20px;
+}
+
+.gs-commerce,
+.gs-chat {
+  background: white;
+  border: 1px solid #e5e9f0;
+  border-radius: 15px;
+  box-shadow: 0 5px 20px rgba(20, 40, 80, 0.04);
+}
+
+.gs-commerce {
+  padding: 22px;
+}
+
+.gs-commerce h2 {
+  margin: 0 0 20px;
+  font-size: 20px;
+}
+
+.gs-panel {
+  margin-bottom: 13px;
+  padding: 15px;
+  border: 1px solid #edf0f5;
+  border-radius: 11px;
+}
+
+.gs-panel h3 {
+  margin: 0 0 7px;
+  font-size: 14px;
+}
+
+.gs-panel p {
+  margin: 0 0 10px;
+  color: #7c8798;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.gs-panel span {
+  color: #5574bc;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.gs-note {
+  padding: 13px;
+  border-radius: 10px;
+  background: #f4f7fc;
+  color: #718096;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.gs-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 700px;
+  overflow: hidden;
+}
+
+.gs-chat-header {
+  padding: 15px 22px;
+  border-bottom: 1px solid #e8ecf2;
+}
+
+.gs-chat-header h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.gs-chat-header select {
+  margin-left: auto;
+  padding: 9px;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: white;
+}
+
+.gs-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 25px;
+}
+
+.gs-message {
+  max-width: 78%;
+  margin-bottom: 20px;
+}
+
+.gs-message.user {
+  margin-left: auto;
+  text-align: right;
+}
+
+.gs-message-name {
+  margin-bottom: 6px;
+  color: #8290a3;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.gs-bubble {
+  display: inline-block;
+  padding: 12px 15px;
+  border-radius: 13px;
+  background: #f0f3f8;
+  color: #344257;
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.gs-message.user .gs-bubble {
+  background: #2457d6;
+  color: white;
+}
+
+.gs-input-area {
+  padding: 16px 22px;
+  border-top: 1px solid #e8ecf2;
+}
+
+.gs-input-area form {
+  padding: 12px;
+  border: 1px solid #dfe5ee;
+  border-radius: 12px;
+}
+
+.gs-input-area textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 45px;
+  border: 0;
+  outline: 0;
+  font: inherit;
+  font-size: 13px;
+}
+
+.gs-input-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gs-input-footer small {
+  color: #98a2b3;
+  font-size: 10px;
+}
+
+.gs-input-footer button {
+  padding: 9px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #2457d6;
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.gs-input-footer button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.gs-disclaimer {
+  display: block;
+  margin-top: 10px;
+  text-align: center;
+  color: #98a2b3;
+  font-size: 10px;
+}
+
+.gs-error {
+  margin-bottom: 10px;
+  color: #b42318;
+  font-size: 12px;
+}
+
+@media (max-width: 850px) {
+  .gs-layout {
+    grid-template-columns: 270px minmax(0, 1fr);
+    padding: 12px;
+  }
+}
+
+@media (max-width: 650px) {
+  .gs-header {
+    padding: 0 12px;
+  }
+
+  .gs-account > span {
+    display: none;
+  }
+
+  .gs-layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .gs-chat {
+    min-height: 650px;
+  }
+
+  .gs-message {
+    max-width: 95%;
+  }
+}

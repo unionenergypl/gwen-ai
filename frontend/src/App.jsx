@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
+import { apiFetch } from "./services/apiClient";
+
 import GwenEnquiry from "./components/GwenEnquiry/GwenEnquiry";
 
-const API = import.meta.env.VITE_API_BASE || "http://localhost:3000";
+// const API = import.meta.env.VITE_API_BASE || "http://localhost:3000";
+const API = import.meta.env.VITE_API_BASE || "";
 
 const LANGUAGE_OPTIONS = [
   { value: "en", label: "English" },
@@ -427,7 +430,7 @@ export default function App() {
 
       addLog("Sending SDP offer to backend...");
 
-      const response = await fetch(`${API}/api/realtime/sdp`, {
+     const response = await apiFetch("/api/realtime/sdp", {
         method: "POST",
         headers: {
           "Content-Type": "application/sdp",
